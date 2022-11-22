@@ -7,6 +7,8 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from twilio.rest import Client
 from nugu_farm import nugu_settings
+from django.db import connections
+from django.http import JsonResponse
 # Create your views here.
 def health(request):
     return Response({'STATUS': '200 OK'}, status=200)
@@ -19,38 +21,70 @@ def price(request):
     CROP_NAME = reqBody.get('action').get('parameters').get('u_crop').get('value')
     STD_DAY = reqBody.get('action').get('parameters').get('u_date').get('value')
     # 토일 가격 비는 문제 해결해야함
-    if STD_DAY=='오늘' or '현재':
+    if STD_DAY=='오늘' or STD_DAY=='현재':
         days = 0
         index = 0
         daycheck = 0
-    elif STD_DAY=='일주일전' or '지난주':
+    elif STD_DAY=='일주일전' or STD_DAY== '지난주':
         days = -7
         index = 5
         daycheck = 1
-    elif STD_DAY=='한달전' or '지난달':
+    elif STD_DAY=='한달전' or STD_DAY == '지난달':
         days = -35
         index = 25
         daycheck = 1
     elif STD_DAY=='내일':
         days = 1
         daycheck = 2
+    elif STD_DAY=='이일후':
+        days = 2
+        daycheck = 2
+    elif STD_DAY=='삼일후':
+        days = 3
+        daycheck = 2
+        print('삼일후daycheck: ',daycheck)
+    elif STD_DAY=='사일후':
+        days = 4
+        daycheck = 2
+    elif STD_DAY=='오일후':
+        days = 5
+        daycheck = 2
+    elif STD_DAY=='육일후':
+        days = 6
+        daycheck = 2
+    elif STD_DAY=='다음주':
+        days = 7
+        daycheck = 2
 
     td = datetime.timedelta(days=days)
 
-    now_date = datetime.date.today() + datetime.timedelta(days=-1) #최신 업데이트날짜
-    past_date= now_date+ td # 유동 timedelta 추가
-    
-    CROP_DICT = nugu_settings.CROP_DICTIONARY
-    itemcode = CROP_DICT[f'{CROP_NAME}'][0]
-    category_code = (int(itemcode)/100)*100
-    kindcode = CROP_DICT[f'{CROP_NAME}'][1]
-    kamis_key = nugu_settings.KAMIS_KEY
-    kamis_id = nugu_settings.KAMIS_ID
-    KAMIS_URL = f'http://www.kamis.or.kr/service/price/xml.do?action=periodProductList&p_productclscode=01&p_startday={past_date}&p_endday={now_date}&p_itemcategorycode={category_code}&p_itemcode={itemcode}&p_kindcode={kindcode}&p_productrankcode=04&p_countrycode=1101&p_convert_kg_yn=Y&p_cert_key={kamis_key}&p_cert_id={kamis_id}&p_returntype=json'
-    kamis_res = requests.get(KAMIS_URL)
-    kamis_json = kamis_res.json()
-    past_price = kamis_json['data']['item'][0]['price'] #과거
-    now_price = kamis_json['data']['item'][index]['price'] #현재 (일주일전에서 현재가격으로 오려면 [5](주말빼서)
+    if daycheck == 0:
+        now_date = datetime.date.today() + datetime.timedelta(days=-1) #최신 업데이트날짜
+        past_date= now_date+ td # 유동 timedelta 추가
+    elif daycheck == 1:
+        now_date = datetime.date.today() + datetime.timedelta(days=-1) #최신 업데이트날짜
+        past_date= now_date+ td # 유동 timedelta 추가
+        # future_date = None
+    elif daycheck == 2:
+        past_date=None
+        now_date = datetime.date.today()
+        future_date = now_date + td 
+    global future_price # 밑에서 전역변수 설정 예정
+    future_price = 0
+    if daycheck == 0 or daycheck == 1:
+        CROP_DICT = nugu_settings.CROP_DICTIONARY
+        itemcode = CROP_DICT[f'{CROP_NAME}'][0]
+        category_code = (int(itemcode)/100)*100
+        kindcode = CROP_DICT[f'{CROP_NAME}'][1]
+        kamis_key = nugu_settings.KAMIS_KEY
+        kamis_id = nugu_settings.KAMIS_ID
+        KAMIS_URL = f'http://www.kamis.or.kr/service/price/xml.do?action=periodProductList&p_productclscode=01&p_startday={past_date}&p_endday={now_date}&p_itemcategorycode={category_code}&p_itemcode={itemcode}&p_kindcode={kindcode}&p_productrankcode=04&p_countrycode=1101&p_convert_kg_yn=Y&p_cert_key={kamis_key}&p_cert_id={kamis_id}&p_returntype=json'
+        kamis_res = requests.get(KAMIS_URL)
+        kamis_json = kamis_res.json()
+        past_price = int(kamis_json['data']['item'][0]['price'].replace(',','')) #과거
+        
+        now_price = int(kamis_json['data']['item'][index]['price'].replace(',','')) #현재 (일주일전에서 현재가격으로 오려면 [5](주말빼서)
+        
 
             ####### daycheck: 현재=0 과거=1 미래=2 오류=-1
             ## change calculation part ##
@@ -63,7 +97,7 @@ def price(request):
             'daycheck' : daycheck,
         }
     elif daycheck == 1:
-        dif = (now_price - past_price)  
+        dif = (now_price) - (past_price)
         if(dif>0):
             parameters = {
             'now_price' : now_price,
@@ -89,7 +123,23 @@ def price(request):
                 'daycheck' : daycheck,  
             }
     else:
-        pass
+
+        cursor = connections['default'].cursor()
+        strSql = "select price from PriceOutput natural join FreshProfile where date='{}' and name='{}';".format(future_date, CROP_NAME)
+        result = cursor.execute(strSql)
+        rows = cursor.fetchall()
+        future_price = int(rows[0][0])
+        parameters = {
+            'now_price' : None,
+            'past_price' : None,
+            'change' : None,
+            'change_state' : None,
+            'daycheck' : 2,
+            'EMD_price' : None,
+            'EMD_name' : None,
+            'future_price' : future_price,
+        }
+
     ##################################################################################################
     ## EMD Part ##
 
@@ -133,7 +183,7 @@ def price(request):
         elif daycheck==1:
             body=f'*NUGU-FRESH*\n{CROP_NAME}의 현재가: {now_price}원\n{STD_DAY} 가격 : {past_price}원\n가격 변동: {change}\n{emd_name} 가격: {cheapest}원\n'
         elif daycheck==2:
-            body=f'*NUGU-FRESH*\n{CROP_NAME}의 현재가: {now_price}원\n{STD_DAY} 가격 : {future_price}원\n{emd_name} 가격: {cheapest}원\n'
+            body=f'*NUGU-FRESH*\n{CROP_NAME}의 {STD_DAY} 가격 : {future_price}원\n{emd_name} 가격: {cheapest}원\n'
         else:
             body='잘못된 날짜입력'
         message = client.messages.create(
